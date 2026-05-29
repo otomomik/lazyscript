@@ -202,7 +202,7 @@ async fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> Result<()> {
                             let z = awaiting_z;
                             awaiting_z = false;
                             match k.code {
-                                KeyCode::Char('q') | KeyCode::Esc => break,
+                                KeyCode::Char('q') => break,
                                 KeyCode::Char('j') | KeyCode::Down => app.select_next(),
                                 KeyCode::Char('k') | KeyCode::Up => app.select_prev(),
                                 KeyCode::Char('h') | KeyCode::Left => app.select_header(),
