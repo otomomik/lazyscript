@@ -279,8 +279,10 @@ impl CopyState {
             }
             KeyCode::Char('d') if ctrl => self.half_page_down(viewport_height),
             KeyCode::Char('u') if ctrl => self.half_page_up(viewport_height),
+            KeyCode::Char('f') if ctrl => self.full_page_down(viewport_height),
+            KeyCode::Char('b') if ctrl => self.full_page_up(viewport_height),
             KeyCode::Char('w') => self.word_forward(viewport_height),
-            KeyCode::Char('b') if !ctrl => self.word_back(viewport_height),
+            KeyCode::Char('b') => self.word_back(viewport_height),
             KeyCode::Char('e') => self.word_end(viewport_height),
             // 選択（Ctrl-v は矩形なので先に判定）。
             KeyCode::Char('v') if ctrl => self.set_selection(SelectionKind::Block),
@@ -477,6 +479,22 @@ impl CopyState {
         self.clamp_view(viewport_height);
     }
 
+    pub fn full_page_down(&mut self, viewport_height: usize) {
+        self.pending.clear();
+        let step = viewport_height.max(1);
+        self.cursor.row = (self.cursor.row + step).min(self.last_row());
+        self.clamp_cursor_col();
+        self.clamp_view(viewport_height);
+    }
+
+    pub fn full_page_up(&mut self, viewport_height: usize) {
+        self.pending.clear();
+        let step = viewport_height.max(1);
+        self.cursor.row = self.cursor.row.saturating_sub(step);
+        self.clamp_cursor_col();
+        self.clamp_view(viewport_height);
+    }
+
     fn clamp_cursor_col(&mut self) {
         self.cursor.col = self.cursor.col.min(self.last_col());
     }
@@ -504,7 +522,13 @@ impl CopyState {
                 }
             }
             if let Some(s) = start {
-                words.push((Pos { row, col: s }, Pos { row, col: width - 1 }));
+                words.push((
+                    Pos { row, col: s },
+                    Pos {
+                        row,
+                        col: width - 1,
+                    },
+                ));
             }
         }
         words

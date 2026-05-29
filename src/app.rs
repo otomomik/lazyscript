@@ -7,7 +7,8 @@ use ratatui::crossterm::event::KeyCode;
 use crate::config::Config;
 use crate::copy_mode::CopyState;
 use crate::runner::{ProcId, ProcStatus, Process};
-use crate::source::{Registry, Script, SourceId};
+use crate::source::{AD_HOC, Registry, Script, SourceId};
+use crate::text_input::TextInput;
 
 /// 左ペインに並ぶ表示行（折りたたみ反映済み）。
 pub enum Row {
@@ -38,6 +39,8 @@ pub enum Mode {
     Normal,
     Copy(CopyState),
     Edit(EditState),
+    /// その場限りのコマンド入力中。
+    Run(TextInput),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -51,8 +54,8 @@ pub struct EditState {
     pub source: SourceId,
     /// 既存編集なら元の名前。新規追加なら None。
     pub original: Option<String>,
-    pub name: String,
-    pub command: String,
+    pub name: TextInput,
+    pub command: TextInput,
     pub field: EditField,
 }
 
@@ -79,22 +82,17 @@ impl EditState {
                     self.field = EditField::Command;
                     EditOutcome::Stay
                 }
-                EditField::Command if !self.name.trim().is_empty() => EditOutcome::Commit,
+                EditField::Command if !self.name.as_str().trim().is_empty() => EditOutcome::Commit,
                 EditField::Command => EditOutcome::Stay,
             },
-            KeyCode::Backspace => {
-                self.current_mut().pop();
+            other => {
+                self.active_mut().handle_key(other);
                 EditOutcome::Stay
             }
-            KeyCode::Char(c) => {
-                self.current_mut().push(c);
-                EditOutcome::Stay
-            }
-            _ => EditOutcome::Stay,
         }
     }
 
-    fn current_mut(&mut self) -> &mut String {
+    fn active_mut(&mut self) -> &mut TextInput {
         match self.field {
             EditField::Name => &mut self.name,
             EditField::Command => &mut self.command,
@@ -120,8 +118,10 @@ pub struct App {
     /// 直近のエラー（起動失敗など）を出力ペインに表示する。
     pub error: Option<String>,
     pub config: Config,
+    /// その場実行したコマンド群（メモリ保持、ファイルなし）。
+    ad_hoc: Vec<String>,
     /// 絞り込みクエリ（名前の部分一致、大小無視）。空なら全件。
-    filter: String,
+    filter: TextInput,
     /// フィルタ入力中かどうか。
     filtering: bool,
 }
@@ -150,7 +150,8 @@ impl App {
             out_rows: 1,
             error: None,
             config,
-            filter: String::new(),
+            ad_hoc: Vec::new(),
+            filter: TextInput::new(),
             filtering: false,
         };
         app.rebuild_rows();
@@ -212,7 +213,7 @@ impl App {
 
     /// registry のソース順 + collapsed + filter から表示行を作り直す。
     pub fn rebuild_rows(&mut self) {
-        let needle = self.filter.to_lowercase();
+        let needle = self.filter.as_str().to_lowercase();
         let mut rows = Vec::new();
         for group in &self.registry.groups {
             let matching: Vec<&Script> = group
@@ -240,6 +241,30 @@ impl App {
                 }
             }
         }
+
+        // ad-hoc 実行コマンド群（末尾、ファイルなし）。
+        let matching_adhoc: Vec<&String> = self
+            .ad_hoc
+            .iter()
+            .filter(|c| needle.is_empty() || c.to_lowercase().contains(&needle))
+            .collect();
+        if !matching_adhoc.is_empty() {
+            let collapsed = needle.is_empty() && self.collapsed.contains(&AD_HOC);
+            rows.push(Row::Header {
+                source: AD_HOC,
+                label: "commands".to_string(),
+                collapsed,
+            });
+            if !collapsed {
+                for command in matching_adhoc {
+                    rows.push(Row::Script {
+                        name: command.clone(),
+                        source: AD_HOC,
+                    });
+                }
+            }
+        }
+
         self.rows = rows;
         self.normalize_selection();
     }
@@ -280,7 +305,9 @@ impl App {
     /// l: 見出し上なら、その配下の最初のスクリプトへ移動する（畳まれていれば開く）。
     pub fn select_first_child(&mut self) {
         let header = match self.rows.get(self.selected) {
-            Some(Row::Header { source, collapsed, .. }) => Some((*source, *collapsed)),
+            Some(Row::Header {
+                source, collapsed, ..
+            }) => Some((*source, *collapsed)),
             _ => None,
         };
         if let Some((source, collapsed)) = header {
@@ -294,29 +321,51 @@ impl App {
         }
     }
 
-    /// a: 現在行のソース配下に新規スクリプトを追加する入力を開始。
+    /// a: 現在行のソース配下に新規スクリプトを追加する入力を開始（ad-hoc 見出しでは不可）。
     pub fn begin_add(&mut self) {
-        if let Some(source) = self.current_source() {
+        if let Some(source) = self.current_source()
+            && source != AD_HOC
+        {
             self.mode = Mode::Edit(EditState {
                 source,
                 original: None,
-                name: String::new(),
-                command: String::new(),
+                name: TextInput::new(),
+                command: TextInput::new(),
                 field: EditField::Name,
             });
         }
     }
 
-    /// e: 選択中スクリプトの名前/中身を編集する入力を開始（ヘッダ上では何もしない）。
+    /// e: 選択中スクリプトの名前/中身を編集する入力を開始（ヘッダ・ad-hoc では何もしない）。
     pub fn begin_edit(&mut self) {
-        if let Some(script) = self.selected_script() {
+        if let Some(script) = self.selected_script()
+            && script.source != AD_HOC
+        {
             self.mode = Mode::Edit(EditState {
                 source: script.source,
                 original: Some(script.name.clone()),
-                name: script.name,
-                command: script.command,
+                name: TextInput::seeded(script.name),
+                command: TextInput::seeded(script.command),
                 field: EditField::Name,
             });
+        }
+    }
+
+    /// !: その場限りのコマンド入力を開始する。
+    pub fn begin_run(&mut self) {
+        self.mode = Mode::Run(TextInput::new());
+    }
+
+    /// ad-hoc コマンドを登録して、その行を選択する（実際の起動は呼び出し側）。
+    pub fn add_adhoc(&mut self, command: String) {
+        if !self.ad_hoc.contains(&command) {
+            self.ad_hoc.push(command.clone());
+        }
+        self.rebuild_rows();
+        if let Some(i) = self.rows.iter().position(
+            |r| matches!(r, Row::Script { name, source } if *source == AD_HOC && *name == command),
+        ) {
+            self.selected = i;
         }
     }
 
@@ -327,7 +376,11 @@ impl App {
     }
 
     pub fn filter_query(&self) -> &str {
-        &self.filter
+        self.filter.as_str()
+    }
+
+    pub fn filter_cursor(&self) -> usize {
+        self.filter.cursor()
     }
 
     pub fn start_filter(&mut self) {
@@ -337,14 +390,11 @@ impl App {
         self.rebuild_rows();
     }
 
-    pub fn filter_push(&mut self, c: char) {
-        self.filter.push(c);
-        self.rebuild_rows();
-    }
-
-    pub fn filter_backspace(&mut self) {
-        self.filter.pop();
-        self.rebuild_rows();
+    /// 編集系キーをフィルタ入力に渡す（変化があれば一覧を作り直す）。
+    pub fn filter_key(&mut self, code: KeyCode) {
+        if self.filter.handle_key(code) {
+            self.rebuild_rows();
+        }
     }
 
     /// 入力を終えてフィルタは保持。
@@ -363,9 +413,14 @@ impl App {
         self.rows.get(self.selected).map(Row::source)
     }
 
-    /// 選択中のスクリプト（ヘッダ上なら None）。command も含めて registry から引く。
+    /// 選択中のスクリプト（ヘッダ上なら None）。ad-hoc は名前=コマンド。
     pub fn selected_script(&self) -> Option<Script> {
         match self.rows.get(self.selected) {
+            Some(Row::Script { name, source }) if *source == AD_HOC => Some(Script {
+                name: name.clone(),
+                source: AD_HOC,
+                command: name.clone(),
+            }),
             Some(Row::Script { name, source }) => self.registry.script(*source, name).cloned(),
             _ => None,
         }
@@ -374,6 +429,7 @@ impl App {
     /// 選択中スクリプトの中身（実行されるコマンド文字列）。表示用。
     pub fn selected_command(&self) -> Option<&str> {
         match self.rows.get(self.selected) {
+            Some(Row::Script { name, source }) if *source == AD_HOC => Some(name.as_str()),
             Some(Row::Script { name, source }) => self
                 .registry
                 .script(*source, name)
@@ -417,7 +473,6 @@ impl App {
     }
 
     pub fn status_of(&self, source: SourceId, name: &str) -> Option<ProcStatus> {
-
         self.script_to_proc
             .get(&(source, name.to_string()))
             .and_then(|id| self.procs.get(id))
@@ -470,7 +525,9 @@ mod tests {
         app.rows
             .iter()
             .map(|r| match r {
-                Row::Header { label, collapsed, .. } => {
+                Row::Header {
+                    label, collapsed, ..
+                } => {
                     format!("[{}{}]", if *collapsed { "+" } else { "-" }, label)
                 }
                 Row::Script { name, .. } => name.clone(),
@@ -552,7 +609,7 @@ mod tests {
         let mut app = app();
         app.start_filter();
         for c in "de".chars() {
-            app.filter_push(c);
+            app.filter_key(KeyCode::Char(c));
         }
         // "de" を含むのは dev と deploy。各ソース見出しは残る。
         assert_eq!(
@@ -579,13 +636,23 @@ mod tests {
         app.select_prev(); // package.json ヘッダへ
         assert!(app.selected_is_header());
         app.toggle_collapse_current(); // 畳む
-        assert_eq!(names(&app), ["[+package.json]", "[-scripts.json]", "deploy"]);
+        assert_eq!(
+            names(&app),
+            ["[+package.json]", "[-scripts.json]", "deploy"]
+        );
         // 折りたたんでもヘッダ上に留まる。
         assert_eq!(app.selected, 0);
         app.toggle_collapse_current(); // 展開
         assert_eq!(
             names(&app),
-            ["[-package.json]", "dev", "build", "test", "[-scripts.json]", "deploy"]
+            [
+                "[-package.json]",
+                "dev",
+                "build",
+                "test",
+                "[-scripts.json]",
+                "deploy"
+            ]
         );
     }
 }

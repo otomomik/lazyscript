@@ -7,6 +7,7 @@ mod config;
 mod copy_mode;
 mod runner;
 mod source;
+mod text_input;
 mod vt;
 
 use std::path::{Path, PathBuf};
@@ -24,13 +25,14 @@ use ratatui::crossterm::terminal;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Padding, Paragraph};
+use ratatui::widgets::{Block, Clear, Padding, Paragraph};
 use tokio::sync::mpsc::{self, UnboundedSender};
 
 use app::{App, EditField, EditOutcome, EditState, Mode, Row};
 use copy_mode::{CopyOutcome, CopyState};
 use runner::{ProcEvent, ProcStatus, Process};
 use source::Registry;
+use text_input::TextInput;
 
 /// メインループに集約されるイベント。
 enum Event {
@@ -38,6 +40,13 @@ enum Event {
     Proc(ProcEvent),
     /// 監視対象ファイルが変わったので一覧を再構築する。
     Rediscover,
+}
+
+/// ad-hoc コマンド入力の結果。
+enum RunAction {
+    Stay,
+    Cancel,
+    Submit(String),
 }
 
 /// package.json / scripts.json の変更を監視し、変わったら Rediscover を送る。
@@ -157,14 +166,37 @@ async fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> Result<()> {
                                 EditOutcome::Cancel => app.mode = Mode::Normal,
                                 EditOutcome::Commit => commit_edit(&mut app, &root),
                             }
+                        } else if matches!(app.mode, Mode::Run(_)) {
+                            let action = if let Mode::Run(input) = &mut app.mode {
+                                match k.code {
+                                    KeyCode::Esc => RunAction::Cancel,
+                                    KeyCode::Enter => RunAction::Submit(input.as_str().to_string()),
+                                    other => {
+                                        input.handle_key(other);
+                                        RunAction::Stay
+                                    }
+                                }
+                            } else {
+                                unreachable!()
+                            };
+                            match action {
+                                RunAction::Stay => {}
+                                RunAction::Cancel => app.mode = Mode::Normal,
+                                RunAction::Submit(cmd) => {
+                                    app.mode = Mode::Normal;
+                                    let cmd = cmd.trim().to_string();
+                                    if !cmd.is_empty() {
+                                        app.add_adhoc(cmd);
+                                        run_selected(&mut app, &tx);
+                                    }
+                                }
+                            }
                         } else if app.is_filtering() {
                             // フィルタ入力中。
                             match k.code {
                                 KeyCode::Esc => app.cancel_filter(),
                                 KeyCode::Enter => app.confirm_filter(),
-                                KeyCode::Backspace => app.filter_backspace(),
-                                KeyCode::Char(c) => app.filter_push(c),
-                                _ => {}
+                                other => app.filter_key(other),
                             }
                         } else {
                             let z = awaiting_z;
@@ -184,6 +216,7 @@ async fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> Result<()> {
                                 KeyCode::Char('c') if z => app.set_collapse_current(true),
                                 KeyCode::Char('a') => app.begin_add(),
                                 KeyCode::Char('e') => app.begin_edit(),
+                                KeyCode::Char('!') => app.begin_run(),
                                 KeyCode::Char('v') => enter_copy_mode(&mut app),
                                 _ => {}
                             }
@@ -227,8 +260,8 @@ fn commit_edit(app: &mut App, root: &Path) {
         Mode::Edit(s) => (
             s.source,
             s.original.clone(),
-            s.name.trim().to_string(),
-            s.command.clone(),
+            s.name.as_str().trim().to_string(),
+            s.command.as_str().to_string(),
         ),
         _ => return,
     };
@@ -338,44 +371,119 @@ fn draw(f: &mut Frame, app: &App) {
     ])
     .areas(right_area);
 
-    // フォーカスは Normal=Scripts / Copy=Output。
-    let scripts_focused = matches!(app.mode, Mode::Normal);
+    // フォーカスは Scripts 側（Normal/Run）か Output 側（Copy/Edit）か。
+    let scripts_focused = matches!(app.mode, Mode::Normal | Mode::Run(_));
     render_scripts(f, app, scripts_area, scripts_focused);
     render_command(f, app, command_area);
     render_output(f, app, output_area, !scripts_focused);
 
-    let hint: String = match &app.mode {
-        Mode::Normal => {
-            if app.is_filtering() {
-                format!(" filter: {}_   (Enter: keep   Esc: clear) ", app.filter_query())
-            } else {
-                " j/k: move   h/l: nav   space: run/stop   a: add   e: edit   /: filter   v: copy   q/^C: quit "
+    let bar = Style::default().add_modifier(Modifier::REVERSED);
+    if app.is_filtering() {
+        // フィルタはブロックカーソルつきで描画（位置を見やすく）。
+        let cursor_style = Style::default()
+            .bg(app.config.theme.cursor)
+            .fg(Color::Black);
+        let mut spans = vec![Span::styled(" filter: ", bar)];
+        spans.extend(cursor_spans(
+            app.filter_query(),
+            app.filter_cursor(),
+            bar,
+            cursor_style,
+        ));
+        spans.push(Span::styled("   (Enter: keep   Esc: clear) ", bar));
+        f.render_widget(Paragraph::new(Line::from(spans)), hint_area);
+    } else {
+        let hint: String = match &app.mode {
+            Mode::Normal => {
+                " j/k: move   h/l: nav   space: run/stop   a: add   e: edit   !: run   /: filter   v: copy   q/^C: quit "
                     .to_string()
             }
-        }
-        Mode::Edit(state) => {
-            let what = if state.original.is_some() { "edit" } else { "add" };
-            format!(" {what} script — Tab: switch field   Enter: next/save   Esc: cancel ")
-        }
-        Mode::Copy(state) => {
-            if let Some(prompt) = state.search_prompt() {
-                let total = state.search_count().map(|(_, t)| t).unwrap_or(0);
-                format!(" {prompt}_   {total} matches   (Enter: jump   Esc: cancel) ")
-            } else if let Some((current, total)) = state.search_count() {
-                format!(
-                    " [{current}/{total}] \"{}\"   n/N: next   y/Enter: yank   Esc: clear   q: exit ",
-                    state.search_query().unwrap_or("")
-                )
-            } else {
-                " hjkl: move   w/b/e: word   v/V/C-v: select   o: swap   /?: search   y/Enter: yank   Esc: clear   q: exit "
-                    .to_string()
+            Mode::Run(_) => {
+                " run command — type a command   Enter: run   Esc: cancel ".to_string()
             }
-        }
-    };
-    f.render_widget(
-        Paragraph::new(hint).style(Style::default().add_modifier(Modifier::REVERSED)),
-        hint_area,
+            Mode::Edit(state) => {
+                let what = if state.original.is_some() { "edit" } else { "add" };
+                format!(" {what} script — Tab: switch field   Enter: next/save   Esc: cancel ")
+            }
+            Mode::Copy(state) => {
+                if let Some(prompt) = state.search_prompt() {
+                    let total = state.search_count().map(|(_, t)| t).unwrap_or(0);
+                    format!(" {prompt}   {total} matches   (Enter: jump   Esc: cancel) ")
+                } else if let Some((current, total)) = state.search_count() {
+                    format!(
+                        " [{current}/{total}] \"{}\"   n/N: next   y/Enter: yank   Esc: clear   q: exit ",
+                        state.search_query().unwrap_or("")
+                    )
+                } else {
+                    " hjkl: move   w/b/e: word   C-u/C-d/C-f/C-b: page   v/V/C-v: select   /?: search   y: yank   Esc: clear   q: exit "
+                        .to_string()
+                }
+            }
+        };
+        f.render_widget(Paragraph::new(hint).style(bar), hint_area);
+    }
+
+    // ad-hoc 実行はモーダルで入力。
+    if let Mode::Run(input) = &app.mode {
+        render_run_modal(f, app, input);
+    }
+}
+
+/// 値をブロックカーソルつきの spans にする（カーソル位置のセルを反転色で表示）。
+fn cursor_spans(
+    value: &str,
+    cursor: usize,
+    base: Style,
+    cursor_style: Style,
+) -> Vec<Span<'static>> {
+    let chars: Vec<char> = value.chars().collect();
+    let c = cursor.min(chars.len());
+    let before: String = chars[..c].iter().collect();
+    let at: String = chars
+        .get(c)
+        .map(|ch| ch.to_string())
+        .unwrap_or_else(|| " ".to_string());
+    let mut spans = vec![Span::styled(before, base), Span::styled(at, cursor_style)];
+    if c + 1 < chars.len() {
+        let after: String = chars[c + 1..].iter().collect();
+        spans.push(Span::styled(after, base));
+    }
+    spans
+}
+
+/// 画面中央に width×height の矩形を作る。
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let w = width.min(area.width);
+    let h = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+/// ad-hoc コマンド入力のモーダル。
+fn render_run_modal(f: &mut Frame, app: &App, input: &TextInput) {
+    let theme = app.config.theme;
+    let width = 60.min(f.area().width.saturating_sub(4)).max(20);
+    let area = centered_rect(width, 3, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::bordered()
+        .title(" Run command ")
+        .border_style(border_style(true, theme.focus));
+    let inner = block.inner(area);
+    f.render_widget(&block, area);
+
+    let cursor_style = Style::default().bg(theme.cursor).fg(Color::Black);
+    let spans = cursor_spans(
+        input.as_str(),
+        input.cursor(),
+        Style::default(),
+        cursor_style,
     );
+    f.render_widget(Paragraph::new(Line::from(spans)), inner);
 }
 
 /// フォーカス中パネルの外枠色。
@@ -436,7 +544,8 @@ fn script_line<'a>(app: &App, index: usize, row: &'a Row) -> Line<'a> {
         Row::Script { name, source } => {
             spans.push(Span::raw("  "));
             spans.push(Span::raw(name.clone()));
-            if let Some((icon, color)) = status_icon(app.status_of(*source, name), &app.config.theme)
+            if let Some((icon, color)) =
+                status_icon(app.status_of(*source, name), &app.config.theme)
             {
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(icon, Style::default().fg(color)));
@@ -472,17 +581,23 @@ fn render_edit_form(f: &mut Frame, app: &App, area: Rect, pane_focused: bool, st
         " Add script "
     };
     let label_style = Style::default().fg(Color::DarkGray);
-    let active_style = Style::default().fg(app.config.theme.focus);
+    let cursor_style = Style::default()
+        .bg(app.config.theme.cursor)
+        .fg(Color::Black);
 
-    let field_line = |label: &str, value: &str, active: bool| -> Line<'static> {
-        let cursor = if active { "_" } else { "" };
-        Line::from(vec![
-            Span::styled(format!("{label} "), label_style),
-            Span::styled(
-                format!("{value}{cursor}"),
-                if active { active_style } else { Style::default() },
-            ),
-        ])
+    let field_line = |label: &str, input: &TextInput, active: bool| -> Line<'static> {
+        let mut spans = vec![Span::styled(format!("{label} "), label_style)];
+        if active {
+            spans.extend(cursor_spans(
+                input.as_str(),
+                input.cursor(),
+                Style::default(),
+                cursor_style,
+            ));
+        } else {
+            spans.push(Span::raw(input.as_str().to_string()));
+        }
+        Line::from(spans)
     };
 
     let name_active = matches!(state.field, EditField::Name);
@@ -567,7 +682,7 @@ fn render_output(f: &mut Frame, app: &App, area: Rect, pane_focused: bool) {
             theme.search,
             theme.selection,
         ),
-        Mode::Normal => match focused {
+        Mode::Normal | Mode::Run(_) => match focused {
             Some(proc) => {
                 let parser = proc.parser.lock().unwrap();
                 render_screen(parser.screen(), inner, f.buffer_mut());

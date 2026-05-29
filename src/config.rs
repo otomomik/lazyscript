@@ -160,7 +160,9 @@ mod tests {
 
     #[test]
     fn empty_json_yields_defaults() {
-        let cfg = serde_json::from_str::<RawConfig>("{}").unwrap().into_config();
+        let cfg = serde_json::from_str::<RawConfig>("{}")
+            .unwrap()
+            .into_config();
         assert_eq!(cfg.scrollback, 10_000);
         assert!(matches!(cfg.clipboard, ClipboardSink::Both));
         assert_eq!(cfg.theme.cursor, Color::Yellow);

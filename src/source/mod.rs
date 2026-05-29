@@ -1,6 +1,7 @@
 // スクリプトソースの抽象。将来 Makefile/Taskfile を足せるよう、
 // 実行方法を知るのは各ソースの build_command だけにする。
 
+mod ad_hoc;
 mod json_store;
 mod package_json;
 mod registry;
@@ -15,6 +16,9 @@ use std::path::PathBuf;
 /// ソース種別の識別子（"package.json" 等）。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct SourceId(pub &'static str);
+
+/// その場限りのコマンド実行（ファイルに紐づかないメモリ上のグループ）。
+pub const AD_HOC: SourceId = SourceId("commands");
 
 /// 一覧に並ぶ1スクリプト。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +36,24 @@ pub struct CommandSpec {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
+}
+
+/// 生コマンドを「現在のシェル」で実行する CommandSpec を作る。
+/// Unix は $SHELL（無ければ sh）、Windows は cmd。
+pub fn shell_command(command: &str, cwd: PathBuf) -> CommandSpec {
+    #[cfg(windows)]
+    let (program, flag) = ("cmd".to_string(), "/C");
+    #[cfg(not(windows))]
+    let (program, flag) = (
+        std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string()),
+        "-c",
+    );
+    CommandSpec {
+        program,
+        args: vec![flag.to_string(), command.to_string()],
+        cwd,
+        env: Vec::new(),
+    }
 }
 
 pub trait ScriptSource: Send + Sync {

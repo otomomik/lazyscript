@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use super::ad_hoc::AdHocSource;
 use super::package_json::PackageJsonSource;
 use super::scripts_json::ScriptsJsonSource;
 use super::{CommandSpec, Script, ScriptSource, SourceId};
@@ -21,14 +22,15 @@ pub struct Registry {
 impl Registry {
     /// cwd 配下の各ソースを discover する。ソース順は固定（package.json → scripts.json）。
     /// package.json はファイルがある時だけ、scripts.json は常に見出しとして並べる。
+    /// ad-hoc は実行用にのみ登録し、一覧グループは持たない（動的リストは App が保持）。
     pub fn discover(root: &Path) -> Self {
-        let mut sources: Vec<Box<dyn ScriptSource>> = Vec::new();
+        let mut file_sources: Vec<Box<dyn ScriptSource>> = Vec::new();
         if root.join("package.json").exists() {
-            sources.push(Box::new(PackageJsonSource::new(root)));
+            file_sources.push(Box::new(PackageJsonSource::new(root)));
         }
-        sources.push(Box::new(ScriptsJsonSource::new(root)));
+        file_sources.push(Box::new(ScriptsJsonSource::new(root)));
 
-        let groups = sources
+        let groups = file_sources
             .iter()
             .map(|source| SourceGroup {
                 id: source.id(),
@@ -36,6 +38,9 @@ impl Registry {
                 scripts: source.discover().unwrap_or_default(),
             })
             .collect();
+
+        let mut sources = file_sources;
+        sources.push(Box::new(AdHocSource::new(root)));
 
         Self { sources, groups }
     }
@@ -79,7 +84,8 @@ impl Registry {
         new_name: &str,
         command: &str,
     ) -> anyhow::Result<()> {
-        self.source(source)?.edit_script(old_name, new_name, command)
+        self.source(source)?
+            .edit_script(old_name, new_name, command)
     }
 
     #[cfg(test)]

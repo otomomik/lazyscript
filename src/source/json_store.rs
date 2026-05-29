@@ -18,8 +18,7 @@ pub fn read(path: &Path) -> Value {
 /// 2スペース整形＋末尾改行で書き出す（親ディレクトリが無ければ作る）。
 pub fn write(path: &Path, value: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let mut text = serde_json::to_string_pretty(value)?;
     text.push('\n');
@@ -87,7 +86,8 @@ mod tests {
 
     #[test]
     fn rename_keeps_position() {
-        let mut v: Value = serde_json::from_str(r#"{"scripts":{"a":"1","b":"2","c":"3"}}"#).unwrap();
+        let mut v: Value =
+            serde_json::from_str(r#"{"scripts":{"a":"1","b":"2","c":"3"}}"#).unwrap();
         rename_script(&mut v, Some("scripts"), "b", "bb", "22");
         let s = serde_json::to_string(&v["scripts"]).unwrap();
         assert_eq!(s, r#"{"a":"1","bb":"22","c":"3"}"#);

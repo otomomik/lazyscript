@@ -42,8 +42,7 @@ impl ScriptSource for PackageJsonSource {
 
     fn discover(&self) -> Result<Vec<Script>> {
         let path = self.path();
-        let text =
-            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         Ok(parse_scripts(&text))
     }
 
@@ -128,10 +127,7 @@ mod tests {
     #[test]
     fn parses_scripts_in_file_order() {
         let text = r#"{ "scripts": { "dev": "x", "build": "y", "test": "z" } }"#;
-        let names: Vec<_> = parse_scripts(text)
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
+        let names: Vec<_> = parse_scripts(text).into_iter().map(|s| s.name).collect();
         assert_eq!(names, ["dev", "build", "test"]);
     }
 

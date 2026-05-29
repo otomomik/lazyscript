@@ -37,23 +37,13 @@ impl ScriptSource for ScriptsJsonSource {
 
     fn discover(&self) -> Result<Vec<Script>> {
         let path = self.path();
-        let text =
-            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         Ok(parse_scripts(&text))
     }
 
     fn build_command(&self, script: &Script) -> CommandSpec {
-        // 生コマンドをシェル経由で直接実行する。
-        #[cfg(windows)]
-        let (program, flag) = ("cmd", "/C");
-        #[cfg(not(windows))]
-        let (program, flag) = ("sh", "-c");
-        CommandSpec {
-            program: program.to_string(),
-            args: vec![flag.to_string(), script.command.clone()],
-            cwd: self.root.clone(),
-            env: Vec::new(),
-        }
+        // 生コマンドを現在のシェル経由で実行する。
+        super::shell_command(&script.command, self.root.clone())
     }
 
     fn add_script(&self, name: &str, command: &str) -> Result<()> {
@@ -165,7 +155,8 @@ mod tests {
         let spec = source.build_command(&script);
         #[cfg(not(windows))]
         {
-            assert_eq!(spec.program, "sh");
+            let expected = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+            assert_eq!(spec.program, expected);
             assert_eq!(spec.args, ["-c", "echo hi && ls"]);
         }
     }

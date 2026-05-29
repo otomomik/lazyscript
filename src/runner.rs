@@ -116,7 +116,11 @@ impl Process {
             pixel_width: 0,
             pixel_height: 0,
         });
-        self.parser.lock().unwrap().screen_mut().set_size(rows, cols);
+        self.parser
+            .lock()
+            .unwrap()
+            .screen_mut()
+            .set_size(rows, cols);
     }
 
     /// プロセスグループごと強制停止する（npm が fork する sh/node 等まで止める）。
@@ -173,7 +177,10 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(200));
         // 起動直後はグループが生きている。
-        assert!(killpg(pgid, None).is_ok(), "group should be alive before kill");
+        assert!(
+            killpg(pgid, None).is_ok(),
+            "group should be alive before kill"
+        );
 
         proc.kill();
         std::thread::sleep(Duration::from_millis(400));

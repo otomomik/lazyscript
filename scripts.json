@@ -1,0 +1,13 @@
+{
+  "scripts": {
+    "build": "cargo build",
+    "release": "cargo build --release",
+    "test": "cargo test",
+    "check": "cargo check",
+    "clippy": "cargo clippy --all-targets",
+    "fmt": "cargo fmt",
+    "run": "cargo run -- examples/demo",
+    "install": "cargo install --path .",
+    "uninstall": "cargo uninstall lazyscript"
+  }
+}
