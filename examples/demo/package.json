@@ -1,0 +1,12 @@
+{
+  "name": "lazyscript-demo",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "hello": "echo 'hello from npm script'",
+    "count": "for i in 1 2 3 4 5; do echo \"tick $i\"; sleep 0.5; done; echo done",
+    "colors": "printf '\\033[32mgreen\\033[0m \\033[1;34mbold blue\\033[0m \\033[4munderline\\033[0m\\n'",
+    "fail": "echo 'about to fail'; exit 3",
+    "watch": "i=0; while true; do echo \"watching $i\"; i=$((i+1)); sleep 1; done"
+  }
+}
