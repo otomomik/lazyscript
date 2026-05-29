@@ -532,7 +532,6 @@ fn render_scripts(f: &mut Frame, app: &App, area: Rect, focused: bool) {
 
 fn script_line<'a>(app: &App, index: usize, row: &'a Row) -> Line<'a> {
     let selected = index == app.selected;
-    let multi = app.is_multi();
     let mut spans: Vec<Span> = Vec::new();
 
     match row {
@@ -551,8 +550,8 @@ fn script_line<'a>(app: &App, index: usize, row: &'a Row) -> Line<'a> {
             source,
             ..
         } => {
-            // ad-hoc は常に top-level（インデントなし）。それ以外は multi なら2段下げる。
-            let indent = if multi && *source != AD_HOC { "  " } else { "" };
+            // ad-hoc は DirHeader を持たないため top-level（インデントなし）。
+            let indent = if *source == AD_HOC { "" } else { "  " };
             spans.push(Span::raw(indent));
             spans.push(Span::raw(if *collapsed { "▸ " } else { "▾ " }));
             spans.push(Span::styled(
@@ -565,11 +564,7 @@ fn script_line<'a>(app: &App, index: usize, row: &'a Row) -> Line<'a> {
             source,
             dir_index,
         } => {
-            let indent = if multi && *source != AD_HOC {
-                "    "
-            } else {
-                "  "
-            };
+            let indent = if *source == AD_HOC { "  " } else { "    " };
             spans.push(Span::raw(indent));
             spans.push(Span::raw(name.clone()));
             if let Some((icon, color)) = status_icon(
@@ -630,17 +625,13 @@ fn render_edit_form(f: &mut Frame, app: &App, area: Rect, pane_focused: bool, st
     };
 
     let name_active = matches!(state.field, EditField::Name);
-    let source_label = if app.is_multi() {
-        let dir = app
-            .registry
-            .directories
-            .get(state.dir_index)
-            .map(|d| d.label.as_str())
-            .unwrap_or("?");
-        format!("Source:  {} / {}", dir, state.source.0)
-    } else {
-        format!("Source:  {}", state.source.0)
-    };
+    let dir = app
+        .registry
+        .directories
+        .get(state.dir_index)
+        .map(|d| d.label.as_str())
+        .unwrap_or("?");
+    let source_label = format!("Source:  {} / {}", dir, state.source.0);
     let lines = vec![
         Line::from(Span::styled(source_label, label_style)),
         Line::from(""),
@@ -658,14 +649,32 @@ fn render_edit_form(f: &mut Frame, app: &App, area: Rect, pane_focused: bool, st
     );
 }
 
-/// 出力ペインの上に、選択中スクリプトの中身（実行されるコマンド）を表示する。
+/// 出力ペインの上の情報ボックス。title は親コンテキスト（space 区切り）、body は当該行の値だけ。
+/// - Script:       title=" Dir: <p> File: <s> ", body="Command: <cmd>"
+/// - SourceHeader: title=" Dir: <p> ",           body="File: <s>"
+/// - DirHeader:    title=なし,                    body="Dir: <p>"
 fn render_command(f: &mut Frame, app: &App, area: Rect) {
-    let (title, body) = match (app.selected_script(), app.selected_command()) {
-        (Some((_, script)), Some(command)) => {
-            (format!(" Command: {} ", script.name), command.to_string())
+    let dir = app
+        .current_dir_index()
+        .and_then(|i| app.registry.directories.get(i));
+    let source = app.current_source_id();
+    let script = app.selected_script();
+
+    let (title, body) = match (script, source, dir) {
+        (Some((_, _)), Some(src), Some(d)) => {
+            let title = format!(" Dir: {} File: {} ", d.path, src.0);
+            let body = format!("Command: {}", app.selected_command().unwrap_or(""));
+            (title, body)
         }
+        (None, Some(src), Some(d)) => {
+            let title = format!(" Dir: {} ", d.path);
+            let body = format!("File: {}", src.0);
+            (title, body)
+        }
+        (None, None, Some(d)) => (String::new(), format!("Dir: {}", d.path)),
         _ => (" Command ".to_string(), String::new()),
     };
+
     f.render_widget(
         Paragraph::new(body)
             .block(Block::bordered().title(title))

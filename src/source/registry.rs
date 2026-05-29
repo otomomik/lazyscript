@@ -16,7 +16,10 @@ pub struct SourceGroup {
 
 /// CLI で渡された1ディレクトリと、その配下のソース群。
 pub struct DirGroup {
+    /// scripts パネル用の短いラベル（basename）。
     pub label: String,
+    /// command パネル用のフルパス（HOME 配下なら `~/...`）。
+    pub path: String,
     pub source_groups: Vec<SourceGroup>,
 }
 
@@ -51,7 +54,8 @@ impl Registry {
                 .collect();
 
             directories.push(DirGroup {
-                label: dir_label(root),
+                label: dir_basename(root),
+                path: dir_full_label(root),
                 source_groups,
             });
 
@@ -70,11 +74,6 @@ impl Registry {
     /// 全ディレクトリのソースが空（=何も見つからない）かどうか。
     pub fn is_empty(&self) -> bool {
         self.directories.iter().all(|d| d.source_groups.is_empty())
-    }
-
-    /// 複数ディレクトリを表示中か（=DirHeader を出す必要があるか）。
-    pub fn is_multi(&self) -> bool {
-        self.directories.len() > 1
     }
 
     /// (dir_index, source, name) から登録済みスクリプトを引く。
@@ -140,9 +139,9 @@ impl Registry {
     }
 }
 
-/// ディレクトリ名（basename）を表示用ラベルにする。`.` などで file_name が取れない場合は
-/// canonical の末尾を使い、それも失敗したら生のパスを文字列化する。
-fn dir_label(root: &Path) -> String {
+/// scripts パネル用のラベル: ディレクトリ名（basename）。
+/// `.` などで file_name が取れない場合は canonical の末尾を使う。
+fn dir_basename(root: &Path) -> String {
     if let Ok(canon) = root.canonicalize()
         && let Some(name) = canon.file_name().and_then(|s| s.to_str())
     {
@@ -152,4 +151,51 @@ fn dir_label(root: &Path) -> String {
         return name.to_string();
     }
     root.display().to_string()
+}
+
+/// command パネル用のラベル: 絶対パス。HOME 配下は `~` に圧縮する。
+fn dir_full_label(root: &Path) -> String {
+    let abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let path = abs.display().to_string();
+    let Some(home) = std::env::var_os("HOME") else {
+        return path;
+    };
+    let home = home.to_string_lossy();
+    if home.is_empty() {
+        return path;
+    }
+    if path == *home {
+        return "~".to_string();
+    }
+    let prefix = format!("{home}/");
+    match path.strip_prefix(&prefix) {
+        Some(rest) => format!("~/{rest}"),
+        None => path,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dir_full_label;
+    use std::path::Path;
+
+    #[test]
+    fn full_label_replaces_home_with_tilde() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return; // HOME 未設定の環境ではスキップ
+        };
+        let home = home.to_string_lossy().to_string();
+        if home.is_empty() {
+            return;
+        }
+        assert_eq!(dir_full_label(Path::new(&home)), "~");
+    }
+
+    #[test]
+    fn full_label_keeps_full_path_outside_home() {
+        // /tmp は HOME 配下ではないので置換されない。
+        let label = dir_full_label(Path::new("/tmp"));
+        assert!(label.starts_with('/'));
+        assert!(!label.starts_with("~"));
+    }
 }

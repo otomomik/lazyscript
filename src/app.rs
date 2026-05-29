@@ -152,11 +152,11 @@ pub const SCRIPTS_PADDING: u16 = 1;
 /// 出力ペイン上部に出すコマンド表示ボックスの高さ（外枠込み）。
 pub const COMMAND_BOX_HEIGHT: u16 = 3;
 
-/// 多ディレクトリ表示時、SourceHeader / Script に乗せる左インデント。
-const MULTI_SOURCE_INDENT: u16 = 2;
-const MULTI_SCRIPT_INDENT: u16 = 4;
-/// 単一ディレクトリ表示時の Script インデント（従来通り）。
-const SINGLE_SCRIPT_INDENT: u16 = 2;
+/// ツリー描画時のインデント幅（DirHeader 配下の SourceHeader / Script に乗せる）。
+const SOURCE_INDENT: u16 = 2;
+const SCRIPT_INDENT: u16 = 4;
+/// ad-hoc コマンド配下の Script インデント（DirHeader を持たないため浅め）。
+const ADHOC_SCRIPT_INDENT: u16 = 2;
 
 impl App {
     pub fn new(registry: Registry, term_cols: u16, term_rows: u16, config: Config) -> Self {
@@ -185,41 +185,28 @@ impl App {
         app
     }
 
-    pub fn is_multi(&self) -> bool {
-        self.registry.is_multi()
-    }
-
     /// 左ツリーの幅（外枠込み）。中身（ラベル/スクリプト名）に合わせ、端末幅の4割で頭打ち。
     pub fn scripts_width(&self) -> u16 {
-        let multi = self.is_multi();
         let content = if self.registry.is_empty() {
             28 // "No scripts found" メッセージ用の控えめな幅
         } else {
             let mut max: u16 = 0;
-            let source_indent = if multi { MULTI_SOURCE_INDENT } else { 0 };
-            let script_indent = if multi {
-                MULTI_SCRIPT_INDENT
-            } else {
-                SINGLE_SCRIPT_INDENT
-            };
             for dir in &self.registry.directories {
-                if multi {
-                    // "▾ " + dir label
-                    max = max.max(2 + display_width(&dir.label));
-                }
+                // "▾ " + dir label
+                max = max.max(2 + display_width(&dir.label));
                 for g in &dir.source_groups {
-                    max = max.max(source_indent + 2 + display_width(&g.label));
+                    max = max.max(SOURCE_INDENT + 2 + display_width(&g.label));
                     for s in &g.scripts {
                         // "name" + " ●"(アイコン分2)
-                        max = max.max(script_indent + display_width(&s.name) + 2);
+                        max = max.max(SCRIPT_INDENT + display_width(&s.name) + 2);
                     }
                 }
             }
-            // ad-hoc は常に top-level（インデントなし）。
+            // ad-hoc は常に top-level（DirHeader なし、インデントなし）。
             if !self.ad_hoc.is_empty() {
                 max = max.max(2 + display_width("commands"));
                 for c in &self.ad_hoc {
-                    max = max.max(SINGLE_SCRIPT_INDENT + display_width(c) + 2);
+                    max = max.max(ADHOC_SCRIPT_INDENT + display_width(c) + 2);
                 }
             }
             max
@@ -265,15 +252,13 @@ impl App {
 
     /// registry のディレクトリ順 + collapsed + filter から表示行を作り直す。
     pub fn rebuild_rows(&mut self) {
-        let multi = self.is_multi();
         let needle = self.filter.as_str().to_lowercase();
         let mut rows = Vec::new();
 
         for (dir_index, dir) in self.registry.directories.iter().enumerate() {
             // フィルタ中はディレクトリ単位の折りたたみも無視して中を見せる。
-            let dir_collapsed = needle.is_empty()
-                && multi
-                && self.collapsed.contains(&CollapseKey::Dir(dir_index));
+            let dir_collapsed =
+                needle.is_empty() && self.collapsed.contains(&CollapseKey::Dir(dir_index));
 
             // フィルタ中 & 一致なしのディレクトリは隠したい。一旦中身を組み立てて判定。
             let mut child_rows: Vec<Row> = Vec::new();
@@ -310,13 +295,11 @@ impl App {
             if !needle.is_empty() && child_rows.is_empty() {
                 continue;
             }
-            if multi {
-                rows.push(Row::DirHeader {
-                    dir_index,
-                    label: dir.label.clone(),
-                    collapsed: dir_collapsed,
-                });
-            }
+            rows.push(Row::DirHeader {
+                dir_index,
+                label: dir.label.clone(),
+                collapsed: dir_collapsed,
+            });
             if !dir_collapsed {
                 rows.extend(child_rows);
             }
@@ -376,20 +359,16 @@ impl App {
     }
 
     /// h: 1段ずつ親へ。Script → SourceHeader → DirHeader。DirHeader 上では何もしない。
+    /// ad-hoc は DirHeader を持たないので、ad-hoc の SourceHeader 上では止まる。
     pub fn select_header(&mut self) {
         let parent = match self.rows.get(self.selected) {
             Some(Row::Script {
                 dir_index, source, ..
             }) => Some(ParentKind::SourceHeader(*dir_index, *source)),
-            Some(Row::SourceHeader { dir_index, .. }) => {
-                // ad-hoc には DirHeader が無いので h を no-op に。
-                if self.is_multi() {
-                    Some(ParentKind::DirHeader(*dir_index))
-                } else {
-                    None
-                }
-            }
-            Some(Row::DirHeader { .. }) | None => None,
+            Some(Row::SourceHeader {
+                dir_index, source, ..
+            }) if *source != AD_HOC => Some(ParentKind::DirHeader(*dir_index)),
+            Some(Row::SourceHeader { .. } | Row::DirHeader { .. }) | None => None,
         };
         let Some(parent) = parent else { return };
         for i in (0..self.selected).rev() {
@@ -534,6 +513,26 @@ impl App {
         self.filtering = false;
         self.filter.clear();
         self.rebuild_rows();
+    }
+
+    /// 現在行が属するディレクトリのインデックス（行の種別に関わらず）。
+    pub fn current_dir_index(&self) -> Option<usize> {
+        match self.rows.get(self.selected) {
+            Some(Row::DirHeader { dir_index, .. })
+            | Some(Row::SourceHeader { dir_index, .. })
+            | Some(Row::Script { dir_index, .. }) => Some(*dir_index),
+            None => None,
+        }
+    }
+
+    /// 現在行が属するソース（DirHeader 上では None）。
+    pub fn current_source_id(&self) -> Option<SourceId> {
+        match self.rows.get(self.selected) {
+            Some(Row::SourceHeader { source, .. }) | Some(Row::Script { source, .. }) => {
+                Some(*source)
+            }
+            _ => None,
+        }
     }
 
     /// 現在行が属する (dir_index, source)。DirHeader の上では None。
@@ -681,6 +680,7 @@ mod tests {
             .into_iter()
             .map(|(label, sources)| DirGroup {
                 label: label.to_string(),
+                path: format!("/tmp/{label}"),
                 source_groups: sources
                     .into_iter()
                     .map(|(id, scripts)| SourceGroup {
@@ -749,6 +749,7 @@ mod tests {
         assert_eq!(
             names(&app),
             [
+                "[D-dir]",
                 "[-package.json]",
                 "dev",
                 "build",
@@ -777,29 +778,29 @@ mod tests {
     #[test]
     fn scripts_width_fits_widest_label() {
         let app = app();
-        // 単一ディレクトリ。"▾ "(2) + "package.json"(12) + 外枠(2) + 左右パディング(2) = 18。
-        assert_eq!(app.scripts_width(), 18);
+        // DirHeader 配下なので "  ▾ "(4) + "package.json"(12) = 16 が最大。
+        // 外枠(2) + 左右パディング(2) を足して 20。
+        assert_eq!(app.scripts_width(), 20);
     }
 
     #[test]
     fn navigation_visits_headers_and_scripts() {
         let mut app = app();
-        // 初期は最初のスクリプト dev(index 1)。
+        // 0:D 1:H(package.json) 2:dev 3:build 4:test 5:H(scripts.json) 6:deploy
+        assert_eq!(app.selected, 2); // 初期は dev
+        app.select_prev(); // package.json ヘッダ
         assert_eq!(app.selected, 1);
-        app.select_prev(); // package.json ヘッダ(index 0)
-        assert_eq!(app.selected, 0);
         assert!(app.selected_is_header());
-        // 0:H 1:dev 2:build 3:test 4:H(scripts.json) 5:deploy
         for _ in 0..5 {
             app.select_next();
         }
-        assert_eq!(app.selected, 5);
+        assert_eq!(app.selected, 6);
         assert_eq!(
             app.selected_script().map(|(_, s)| s.name),
             Some("deploy".into())
         );
         app.select_next(); // 末尾より先へは進まない
-        assert_eq!(app.selected, 5);
+        assert_eq!(app.selected, 6);
     }
 
     #[test]
@@ -834,10 +835,16 @@ mod tests {
         for c in "de".chars() {
             app.filter_key(KeyCode::Char(c));
         }
-        // "de" を含むのは dev と deploy。各ソース見出しは残る。
+        // "de" を含むのは dev と deploy。DirHeader と各ソース見出しは残る。
         assert_eq!(
             names(&app),
-            ["[-package.json]", "dev", "[-scripts.json]", "deploy"]
+            [
+                "[D-dir]",
+                "[-package.json]",
+                "dev",
+                "[-scripts.json]",
+                "deploy"
+            ]
         );
         app.cancel_filter();
         assert!(names(&app).iter().any(|n| n == "build"));
@@ -845,11 +852,15 @@ mod tests {
 
     #[test]
     fn select_header_and_first_child() {
-        let mut app = app(); // selected = dev (index 1)
-        app.select_header();
+        let mut app = app(); // selected = dev (index 2)
+        app.select_header(); // -> package.json ヘッダ
+        assert_eq!(app.selected, 1);
         assert!(app.selected_is_header());
-        assert_eq!(app.selected, 0); // package.json
-        app.select_first_child();
+        app.select_header(); // -> dir ヘッダ
+        assert_eq!(app.selected, 0);
+        app.select_first_child(); // dir → package.json
+        assert_eq!(app.selected, 1);
+        app.select_first_child(); // package.json → dev
         assert_eq!(
             app.selected_script().map(|(_, s)| s.name),
             Some("dev".into())
@@ -864,14 +875,20 @@ mod tests {
         app.toggle_collapse_current(); // 畳む
         assert_eq!(
             names(&app),
-            ["[+package.json]", "[-scripts.json]", "deploy"]
+            [
+                "[D-dir]",
+                "[+package.json]",
+                "[-scripts.json]",
+                "deploy"
+            ]
         );
         // 折りたたんでもヘッダ上に留まる。
-        assert_eq!(app.selected, 0);
+        assert_eq!(app.selected, 1);
         app.toggle_collapse_current(); // 展開
         assert_eq!(
             names(&app),
             [
+                "[D-dir]",
                 "[-package.json]",
                 "dev",
                 "build",
