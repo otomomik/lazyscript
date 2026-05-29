@@ -10,7 +10,7 @@ mod source;
 mod text_input;
 mod vt;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,7 +31,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use app::{App, EditField, EditOutcome, EditState, Mode, Row};
 use copy_mode::{CopyOutcome, CopyState};
 use runner::{ProcEvent, ProcStatus, Process};
-use source::Registry;
+use source::{AD_HOC, Registry};
 use text_input::TextInput;
 
 /// メインループに集約されるイベント。
@@ -51,7 +51,7 @@ enum RunAction {
 
 /// package.json / scripts.json の変更を監視し、変わったら Rediscover を送る。
 /// 返した watcher は drop すると監視が止まるので呼び出し側で保持する。
-fn setup_watcher(root: &Path, tx: UnboundedSender<Event>) -> Option<RecommendedWatcher> {
+fn setup_watcher(roots: &[PathBuf], tx: UnboundedSender<Event>) -> Option<RecommendedWatcher> {
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res
             && event.paths.iter().any(|p| {
@@ -65,7 +65,9 @@ fn setup_watcher(root: &Path, tx: UnboundedSender<Event>) -> Option<RecommendedW
         }
     })
     .ok()?;
-    watcher.watch(root, RecursiveMode::NonRecursive).ok()?;
+    for root in roots {
+        let _ = watcher.watch(root, RecursiveMode::NonRecursive);
+    }
     Some(watcher)
 }
 
@@ -73,24 +75,22 @@ fn setup_watcher(root: &Path, tx: UnboundedSender<Event>) -> Option<RecommendedW
 #[derive(Parser)]
 #[command(name = "lazyscript", version, about)]
 struct Cli {
-    /// スクリプトを探す作業ディレクトリ（位置引数でも指定可）。
-    #[arg(long, value_name = "DIR")]
-    cwd: Option<PathBuf>,
-    /// 作業ディレクトリ（位置引数）。--cwd が優先。
+    /// 作業ディレクトリ（複数指定可、未指定なら current_dir）。
     #[arg(value_name = "DIR")]
-    dir: Option<PathBuf>,
+    dirs: Vec<PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let root = match cli.cwd.or(cli.dir) {
-        Some(path) => path,
-        None => std::env::current_dir()?,
+    let roots: Vec<PathBuf> = if cli.dirs.is_empty() {
+        vec![std::env::current_dir()?]
+    } else {
+        cli.dirs
     };
 
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, root).await;
+    let result = run(&mut terminal, roots).await;
     ratatui::restore();
     result
 }
@@ -100,16 +100,16 @@ fn layout_main(area: Rect, scripts_width: u16) -> [Rect; 2] {
     Layout::horizontal([Constraint::Length(scripts_width), Constraint::Min(0)]).areas(area)
 }
 
-async fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> Result<()> {
+async fn run(terminal: &mut DefaultTerminal, roots: Vec<PathBuf>) -> Result<()> {
     let (term_cols, term_rows) = terminal::size()?;
 
-    let registry = Registry::discover(&root);
+    let registry = Registry::discover(&roots);
     let mut app = App::new(registry, term_cols, term_rows, config::load());
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
 
     // ファイル監視（drop されると監視が止まるのでループ中保持する）。
-    let _watcher = setup_watcher(&root, tx.clone());
+    let _watcher = setup_watcher(&roots, tx.clone());
 
     // 入力スレッド（crossterm の read は blocking）。
     {
@@ -164,7 +164,7 @@ async fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> Result<()> {
                             match outcome {
                                 EditOutcome::Stay => {}
                                 EditOutcome::Cancel => app.mode = Mode::Normal,
-                                EditOutcome::Commit => commit_edit(&mut app, &root),
+                                EditOutcome::Commit => commit_edit(&mut app, &roots),
                             }
                         } else if matches!(app.mode, Mode::Run(_)) {
                             let action = if let Mode::Run(input) = &mut app.mode {
@@ -232,7 +232,7 @@ async fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> Result<()> {
                     }
                     Event::Input(_) => {}
                     Event::Rediscover => {
-                        app.reload(Registry::discover(&root));
+                        app.reload(Registry::discover(&roots));
                         app.recompute_output_size();
                         for proc in app.procs.values() {
                             proc.resize(app.out_rows, app.out_cols);
@@ -255,9 +255,10 @@ async fn run(terminal: &mut DefaultTerminal, root: PathBuf) -> Result<()> {
 }
 
 /// 編集/追加を確定してファイルへ書き戻し、一覧を再構築する。
-fn commit_edit(app: &mut App, root: &Path) {
-    let (source, original, name, command) = match &app.mode {
+fn commit_edit(app: &mut App, roots: &[PathBuf]) {
+    let (dir_index, source, original, name, command) = match &app.mode {
         Mode::Edit(s) => (
+            s.dir_index,
             s.source,
             s.original.clone(),
             s.name.as_str().trim().to_string(),
@@ -268,13 +269,15 @@ fn commit_edit(app: &mut App, root: &Path) {
     app.mode = Mode::Normal;
 
     let result = match &original {
-        Some(old) => app.registry.edit_script(source, old, &name, &command),
-        None => app.registry.add_script(source, &name, &command),
+        Some(old) => app
+            .registry
+            .edit_script(dir_index, source, old, &name, &command),
+        None => app.registry.add_script(dir_index, source, &name, &command),
     };
     match result {
         Ok(()) => {
             app.error = None;
-            app.reload(Registry::discover(root));
+            app.reload(Registry::discover(roots));
             app.recompute_output_size();
             for proc in app.procs.values() {
                 proc.resize(app.out_rows, app.out_cols);
@@ -313,10 +316,10 @@ fn is_selected_running(app: &App) -> bool {
 
 /// 選択中スクリプトを実行する。既存プロセスがあれば停止してから起動し直す。
 fn run_selected(app: &mut App, tx: &UnboundedSender<Event>) {
-    let Some(script) = app.selected_script() else {
+    let Some((dir_index, script)) = app.selected_script() else {
         return;
     };
-    let key = (script.source, script.name.clone());
+    let key = (dir_index, script.source, script.name.clone());
 
     // 実行中・終了済みを問わず、既存プロセスは止めて作り直す（= 再実行）。
     if let Some(old_id) = app.script_to_proc.remove(&key)
@@ -325,7 +328,7 @@ fn run_selected(app: &mut App, tx: &UnboundedSender<Event>) {
         old.kill();
     }
 
-    let Some(spec) = app.registry.build_command(&script) else {
+    let Some(spec) = app.registry.build_command(dir_index, &script) else {
         return;
     };
     let id = app.next_id;
@@ -529,10 +532,11 @@ fn render_scripts(f: &mut Frame, app: &App, area: Rect, focused: bool) {
 
 fn script_line<'a>(app: &App, index: usize, row: &'a Row) -> Line<'a> {
     let selected = index == app.selected;
+    let multi = app.is_multi();
     let mut spans: Vec<Span> = Vec::new();
 
     match row {
-        Row::Header {
+        Row::DirHeader {
             label, collapsed, ..
         } => {
             spans.push(Span::raw(if *collapsed { "▸ " } else { "▾ " }));
@@ -541,12 +545,37 @@ fn script_line<'a>(app: &App, index: usize, row: &'a Row) -> Line<'a> {
                 Style::default().add_modifier(Modifier::BOLD),
             ));
         }
-        Row::Script { name, source } => {
-            spans.push(Span::raw("  "));
+        Row::SourceHeader {
+            label,
+            collapsed,
+            source,
+            ..
+        } => {
+            // ad-hoc は常に top-level（インデントなし）。それ以外は multi なら2段下げる。
+            let indent = if multi && *source != AD_HOC { "  " } else { "" };
+            spans.push(Span::raw(indent));
+            spans.push(Span::raw(if *collapsed { "▸ " } else { "▾ " }));
+            spans.push(Span::styled(
+                label.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+        }
+        Row::Script {
+            name,
+            source,
+            dir_index,
+        } => {
+            let indent = if multi && *source != AD_HOC {
+                "    "
+            } else {
+                "  "
+            };
+            spans.push(Span::raw(indent));
             spans.push(Span::raw(name.clone()));
-            if let Some((icon, color)) =
-                status_icon(app.status_of(*source, name), &app.config.theme)
-            {
+            if let Some((icon, color)) = status_icon(
+                app.status_of(*dir_index, *source, name),
+                &app.config.theme,
+            ) {
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(icon, Style::default().fg(color)));
             }
@@ -601,11 +630,19 @@ fn render_edit_form(f: &mut Frame, app: &App, area: Rect, pane_focused: bool, st
     };
 
     let name_active = matches!(state.field, EditField::Name);
+    let source_label = if app.is_multi() {
+        let dir = app
+            .registry
+            .directories
+            .get(state.dir_index)
+            .map(|d| d.label.as_str())
+            .unwrap_or("?");
+        format!("Source:  {} / {}", dir, state.source.0)
+    } else {
+        format!("Source:  {}", state.source.0)
+    };
     let lines = vec![
-        Line::from(Span::styled(
-            format!("Source:  {}", state.source.0),
-            label_style,
-        )),
+        Line::from(Span::styled(source_label, label_style)),
         Line::from(""),
         field_line("Name:   ", &state.name, name_active),
         field_line("Command:", &state.command, !name_active),
@@ -624,7 +661,7 @@ fn render_edit_form(f: &mut Frame, app: &App, area: Rect, pane_focused: bool, st
 /// 出力ペインの上に、選択中スクリプトの中身（実行されるコマンド）を表示する。
 fn render_command(f: &mut Frame, app: &App, area: Rect) {
     let (title, body) = match (app.selected_script(), app.selected_command()) {
-        (Some(script), Some(command)) => {
+        (Some((_, script)), Some(command)) => {
             (format!(" Command: {} ", script.name), command.to_string())
         }
         _ => (" Command ".to_string(), String::new()),

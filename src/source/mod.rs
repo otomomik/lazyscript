@@ -9,7 +9,7 @@ mod scripts_json;
 
 pub use registry::Registry;
 #[cfg(test)]
-pub use registry::SourceGroup;
+pub use registry::{DirGroup, SourceGroup};
 
 use std::path::PathBuf;
 
