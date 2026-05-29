@@ -374,8 +374,8 @@ fn draw(f: &mut Frame, app: &App) {
     ])
     .areas(right_area);
 
-    // フォーカスは Scripts 側（Normal/Run）か Output 側（Copy/Edit）か。
-    let scripts_focused = matches!(app.mode, Mode::Normal | Mode::Run(_));
+    // フォーカスは Scripts 側（Normal/Run/Edit はモーダル入力）か Output 側（Copy）か。
+    let scripts_focused = matches!(app.mode, Mode::Normal | Mode::Run(_) | Mode::Edit(_));
     render_scripts(f, app, scripts_area, scripts_focused);
     render_command(f, app, command_area);
     render_output(f, app, output_area, !scripts_focused);
@@ -426,9 +426,12 @@ fn draw(f: &mut Frame, app: &App) {
         f.render_widget(Paragraph::new(hint).style(bar), hint_area);
     }
 
-    // ad-hoc 実行はモーダルで入力。
+    // 入力系モード（ad-hoc 実行 / 追加・編集）はモーダルで重ねる。
     if let Mode::Run(input) = &app.mode {
         render_run_modal(f, app, input);
+    }
+    if let Mode::Edit(state) = &app.mode {
+        render_edit_modal(f, app, state);
     }
 }
 
@@ -467,10 +470,17 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 /// ad-hoc コマンド入力のモーダル。
+/// 最初はコンテンツに合わせて fit、端末幅の 50% に達したら折り返す。
 fn render_run_modal(f: &mut Frame, app: &App, input: &TextInput) {
     let theme = app.config.theme;
-    let width = 60.min(f.area().width.saturating_sub(4)).max(20);
-    let area = centered_rect(width, 3, f.area());
+    let term_w = f.area().width;
+    let term_h = f.area().height;
+    let content_chars = input.as_str().chars().count() as u16 + 1; // +1 for cursor
+    let width = modal_width(content_chars, term_w, 30);
+    let inner_w = width.saturating_sub(2).max(1); // 外枠分
+    let inner_rows = content_chars.div_ceil(inner_w).max(1);
+    let height = (inner_rows + 2).min(term_h).max(3);
+    let area = centered_rect(width, height, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::bordered()
@@ -486,7 +496,16 @@ fn render_run_modal(f: &mut Frame, app: &App, input: &TextInput) {
         Style::default(),
         cursor_style,
     );
-    f.render_widget(Paragraph::new(Line::from(spans)), inner);
+    let lines = wrap_line_chars(Line::from(spans), inner_w as usize);
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// モーダル幅: content_chars (= 中身の最大幅) + 外枠 2 でフィットさせ、
+/// 端末幅の 50% を上限とする（最小 min_w、最大 = 端末幅 - 2）。
+fn modal_width(content_chars: u16, term_w: u16, min_w: u16) -> u16 {
+    let needed = content_chars.saturating_add(2);
+    let cap = (term_w / 2).max(min_w).min(term_w.saturating_sub(2).max(min_w));
+    needed.max(min_w).min(cap)
 }
 
 /// フォーカス中パネルの外枠色。
@@ -597,17 +616,34 @@ fn status_icon(status: Option<ProcStatus>, theme: &config::Theme) -> Option<(&'s
     }
 }
 
-/// 新規追加/編集の入力フォームを出力ペイン位置に表示する。
-fn render_edit_form(f: &mut Frame, app: &App, area: Rect, pane_focused: bool, state: &EditState) {
-    let title = if state.original.is_some() {
-        " Edit script "
-    } else {
-        " Add script "
-    };
+/// 新規追加/編集の入力モーダル。
+/// 最初はコンテンツに合わせて fit、端末幅の 50% に達したら各行を文字単位で折り返す。
+/// （word-wrap は使わない: ラベル直後で長い1単語が来ると勝手に改行されて Command が消えるため）。
+fn render_edit_modal(f: &mut Frame, app: &App, state: &EditState) {
+    let theme = app.config.theme;
+
+    let dir = app
+        .registry
+        .directories
+        .get(state.dir_index)
+        .map(|d| d.path.as_str())
+        .unwrap_or("?");
+    let source_label = format!("Source:  {}/{}", dir, state.source.0);
+    // "Name:    " / "Command: " ラベル (9 文字) + 区切り空白。
+    const FIELD_PREFIX_LEN: usize = 10;
+
+    let source_chars = source_label.chars().count() as u16;
+    let name_chars = (FIELD_PREFIX_LEN + state.name.as_str().chars().count() + 1) as u16;
+    let cmd_chars = (FIELD_PREFIX_LEN + state.command.as_str().chars().count() + 1) as u16;
+    let max_chars = source_chars.max(name_chars).max(cmd_chars);
+
+    let term_w = f.area().width;
+    let term_h = f.area().height;
+    let width = modal_width(max_chars, term_w, 40);
+    let inner_w = width.saturating_sub(2).max(1);
+
     let label_style = Style::default().fg(Color::DarkGray);
-    let cursor_style = Style::default()
-        .bg(app.config.theme.cursor)
-        .fg(Color::Black);
+    let cursor_style = Style::default().bg(theme.cursor).fg(Color::Black);
 
     let field_line = |label: &str, input: &TextInput, active: bool| -> Line<'static> {
         let mut spans = vec![Span::styled(format!("{label} "), label_style)];
@@ -625,28 +661,83 @@ fn render_edit_form(f: &mut Frame, app: &App, area: Rect, pane_focused: bool, st
     };
 
     let name_active = matches!(state.field, EditField::Name);
-    let dir = app
-        .registry
-        .directories
-        .get(state.dir_index)
-        .map(|d| d.label.as_str())
-        .unwrap_or("?");
-    let source_label = format!("Source:  {} / {}", dir, state.source.0);
-    let lines = vec![
+    let logical_lines = vec![
         Line::from(Span::styled(source_label, label_style)),
         Line::from(""),
         field_line("Name:   ", &state.name, name_active),
         field_line("Command:", &state.command, !name_active),
     ];
 
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::bordered()
-                .title(title)
-                .border_style(border_style(pane_focused, app.config.theme.focus)),
-        ),
-        area,
-    );
+    // 文字単位で事前折り返し。これで Wrap を使わずに済み、行数も完全に予測できる。
+    let lines: Vec<Line> = logical_lines
+        .into_iter()
+        .flat_map(|line| wrap_line_chars(line, inner_w as usize))
+        .collect();
+
+    let inner_rows = lines.len() as u16;
+    let height = (inner_rows + 2).min(term_h).max(6);
+    let area = centered_rect(width, height, f.area());
+    f.render_widget(Clear, area);
+
+    let title = if state.original.is_some() {
+        " Edit script "
+    } else {
+        " Add script "
+    };
+    let block = Block::bordered()
+        .title(title)
+        .border_style(border_style(true, theme.focus));
+    let inner = block.inner(area);
+    f.render_widget(&block, area);
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Line を文字単位で width ごとに折り返す。空行は 1 行のままにする。
+/// Span ごとのスタイルは保持する（連続する同スタイル文字を 1 つの Span にまとめる）。
+fn wrap_line_chars(line: Line<'_>, width: usize) -> Vec<Line<'static>> {
+    let chars: Vec<(String, Style)> = line
+        .spans
+        .iter()
+        .flat_map(|span| {
+            let style = span.style;
+            span.content
+                .chars()
+                .map(move |c| (c.to_string(), style))
+        })
+        .collect();
+
+    if chars.is_empty() {
+        return vec![Line::from(String::new())];
+    }
+    if width == 0 {
+        // 守りの分岐。各文字を独立した行に。
+        return chars
+            .into_iter()
+            .map(|(s, style)| Line::from(Span::styled(s, style)))
+            .collect();
+    }
+
+    let mut result = Vec::new();
+    for chunk in chars.chunks(width) {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut buf = String::new();
+        let mut buf_style = chunk[0].1;
+        for (s, style) in chunk {
+            if *style == buf_style {
+                buf.push_str(s);
+            } else {
+                spans.push(Span::styled(std::mem::take(&mut buf), buf_style));
+                buf.push_str(s);
+                buf_style = *style;
+            }
+        }
+        if !buf.is_empty() {
+            spans.push(Span::styled(buf, buf_style));
+        }
+        result.push(Line::from(spans));
+    }
+    result
 }
 
 /// 出力ペインの上の情報ボックス。title は親コンテキスト（space 区切り）、body は当該行の値だけ。
@@ -684,10 +775,6 @@ fn render_command(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_output(f: &mut Frame, app: &App, area: Rect, pane_focused: bool) {
-    if let Mode::Edit(state) = &app.mode {
-        render_edit_form(f, app, area, pane_focused, state);
-        return;
-    }
     let focused = app.focused_proc();
     let title = match focused {
         Some(proc) => format!(" Output: {} [{}] ", proc.script, status_label(proc.status)),
@@ -728,7 +815,7 @@ fn render_output(f: &mut Frame, app: &App, area: Rect, pane_focused: bool) {
             theme.search,
             theme.selection,
         ),
-        Mode::Normal | Mode::Run(_) => match focused {
+        Mode::Normal | Mode::Run(_) | Mode::Edit(_) => match focused {
             Some(proc) => {
                 let parser = proc.parser.lock().unwrap();
                 render_screen(parser.screen(), inner, f.buffer_mut());
@@ -744,8 +831,6 @@ fn render_output(f: &mut Frame, app: &App, area: Rect, pane_focused: bool) {
                 );
             }
         },
-        // Edit は冒頭で別途描画済み。
-        Mode::Edit(_) => {}
     }
 }
 
