@@ -40,17 +40,22 @@ pub struct CommandSpec {
 
 /// 生コマンドを「現在のシェル」で実行する CommandSpec を作る。
 /// Unix は $SHELL（無ければ sh）、Windows は cmd。
+/// Unix では `-i`（対話モード）を付け、rc（.zshrc/.bashrc 等）をソースさせて
+/// ユーザー定義のエイリアスを効かせる。
 pub fn shell_command(command: &str, cwd: PathBuf) -> CommandSpec {
     #[cfg(windows)]
-    let (program, flag) = ("cmd".to_string(), "/C");
+    let (program, args) = (
+        "cmd".to_string(),
+        vec!["/C".to_string(), command.to_string()],
+    );
     #[cfg(not(windows))]
-    let (program, flag) = (
+    let (program, args) = (
         std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string()),
-        "-c",
+        vec!["-i".to_string(), "-c".to_string(), command.to_string()],
     );
     CommandSpec {
         program,
-        args: vec![flag.to_string(), command.to_string()],
+        args,
         cwd,
         env: Vec::new(),
     }

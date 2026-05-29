@@ -157,7 +157,7 @@ mod tests {
         {
             let expected = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
             assert_eq!(spec.program, expected);
-            assert_eq!(spec.args, ["-c", "echo hi && ls"]);
+            assert_eq!(spec.args, ["-i", "-c", "echo hi && ls"]);
         }
     }
 }
