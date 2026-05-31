@@ -414,7 +414,7 @@ fn draw(f: &mut Frame, app: &App) {
                     format!(" {prompt}   {total} matches   (Enter: jump   Esc: cancel) ")
                 } else if let Some((current, total)) = state.search_count() {
                     format!(
-                        " [{current}/{total}] \"{}\"   n/N: next   y/Enter: yank   Esc: clear   q: exit ",
+                        " [{current}/{total}] \"{}\"   n/N: next   y: yank   Esc: clear   q: exit ",
                         state.search_query().unwrap_or("")
                     )
                 } else {

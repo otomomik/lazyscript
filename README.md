@@ -65,7 +65,7 @@ lazyscript ./apps/web ./apps/api
 | `v` / `V` / `Ctrl-V` | 文字 / 行 / 矩形選択 |
 | `/` / `?` | 前方 / 後方検索 |
 | `n` / `N` | 次 / 前のマッチへ |
-| `y` / `Enter` | ヤンクして Normal へ戻る |
+| `y` | ヤンクして Normal へ戻る |
 | `Esc` | 選択/検索をクリア |
 | `q` | copy-mode を抜ける |
 

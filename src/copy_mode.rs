@@ -250,7 +250,7 @@ impl CopyState {
                 self.anchor = None;
                 self.search = None;
             }
-            KeyCode::Char('y') | KeyCode::Enter => {
+            KeyCode::Char('y') => {
                 return match self.extract_selection() {
                     Some(text) => CopyOutcome::Yank(text),
                     None => CopyOutcome::Cancel,
